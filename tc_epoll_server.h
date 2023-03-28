@@ -13,6 +13,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include "tc_epoller.h"
+#include "tc_socket.h"
 namespace tars
 {
 
@@ -34,7 +35,7 @@ namespace tars
         void run();
 
 
-        /// @brief 负责：1.读事件并组织准备回写准备工作
+        /// @brief 负责：1.负责读入和输出数据
         /// @param ev 发生事件epoll_event
         void processNet(const epoll_event &ev);
 
@@ -56,11 +57,12 @@ namespace tars
         } _response;
 
     private:
-        int m_shutdown_sock;
-        int m_notify_sock;
+        // int m_shutdown_sock;
+        // int m_notify_sock;
+        TC_Socket m_shutdown_sock;
+        TC_Socket m_notify_sock;
 
-        int m_sock;
-
+        TC_Socket m_listen_sock;
         int m_ifd;
 
         TC_Epoller m_epoller;

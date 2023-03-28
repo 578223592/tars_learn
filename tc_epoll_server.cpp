@@ -7,25 +7,13 @@ uint64_t H64(uint64_t x)
 
 tars::NetThread::NetThread(/* args */)
 {
-    	//建立用于通知和关闭的socket
-    int iSocketType = SOCK_STREAM;
-    int iDomain = AF_INET;
+    // 建立用于通知和关闭的socket
 
-    m_shutdown_sock = socket(iDomain, iSocketType, 0);
-    m_notify_sock = socket(iDomain, iSocketType, 0);
-	
-    if(m_shutdown_sock < 0)
-    {
-        std::cout<<"_shutdown_sock  invalid"<<std::endl;
-    }
+    m_shutdown_sock.createSocket();
+    m_notify_sock.createSocket();
 
-    if(m_notify_sock < 0)
-    {
-        std::cout<<"_notify_sock invalid"<<std::endl;
-    }
-
-	_response.response="";
-	_response.uid = 0;
+    _response.response = "";
+    _response.uid = 0;
 }
 
 tars::NetThread::~NetThread()
@@ -62,80 +50,29 @@ int tars::NetThread::bind(std::string &ip, int &port)
 {
     // 建立server端接收请求用的socket
     // socket-->bind-->listen
-    if ((m_sock = socket(AF_INET, SOCK_STREAM, 0)) == -1)
-    {
-        std::cerr << "socket failed" << std::endl;
-        exit(EXIT_FAILURE);
-    }
+    m_listen_sock.createSocket(SOCK_STREAM, AF_INET);
     // 如果服务器终止后,服务器可以第二次快速启动而不用等待一段时间
-    int _optval = 1;
-    if (setsockopt(m_sock, SOL_SOCKET, SO_REUSEADDR, (const void *)&_optval, sizeof(_optval)) == -1)
-    {
-        std::cerr << "set socket refuse fail" << std::endl;
-        std::cerr << strerror(errno) << std::endl;
-        exit(EXIT_FAILURE);
-    }
-    sockaddr_in bindAddr;
-    bindAddr.sin_family = AF_INET;
-    // bindAddr.sin_addr.s_addr = INADDR_ANY;
-    parseAddr(ip, bindAddr.sin_addr); // todo：为什么要解析地址，服务器不是应该可以接收任意地址吗
-    bindAddr.sin_port = htons(port);
-    if (::bind(m_sock, (const sockaddr *)&bindAddr, sizeof(bindAddr)))
-    {
-        std::cerr << "bind error" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-    std::cout << "server has bind fd is :" << m_sock << std::endl;
+    m_listen_sock.bind(ip, port);
 
     int iConnBackLog = 1024;
-    if (::listen(m_sock, iConnBackLog) < 0)
-    {
-        std::cerr << "listen error" << std::endl;
-        exit(EXIT_FAILURE);
-    }
+    m_listen_sock.listen(iConnBackLog);
+    std::cout << "server has bind fd is :" << m_listen_sock.getfd() << std::endl;
+
     // 设置长连接
     // 如果服务器终止后,服务器可以第二次快速启动而不用等待一段时间
-    _optval = 1;
-    if (setsockopt(m_sock, SOL_SOCKET, SO_KEEPALIVE, (const void *)&_optval, sizeof(_optval)))
-    {
-        std::cerr << "set SO_KEEPALIVE refuse fail" << std::endl;
-        exit(EXIT_FAILURE);
-    }
+    m_listen_sock.setKeepAlive();
     // 关闭tcp的naga合并发送，提高效率
-    _optval = 1;
-    if (setsockopt(m_sock, IPPROTO_TCP, TCP_NODELAY, (const void *)&_optval, sizeof(_optval)))
-    {
-        std::cerr << "[TC_Socket::setTcpNoDelay] error" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-    linger stLinger;
-    stLinger.l_onoff = 1;  // 在close socket调用后, 但是还有数据没发送完毕的时候容许逗留
-    stLinger.l_linger = 5; // 容许逗留的时间为0秒
+    m_listen_sock.setTcpNoDelay();
 
-    if (setsockopt(m_sock, SOL_SOCKET, SO_LINGER, (const void *)&stLinger, sizeof(linger)) == -1)
-    {
-        std::cout << "[TC_Socket::setNoCloseWait] error" << std::endl;
-        exit(EXIT_FAILURE);
-    }
+    // 不要设置close wait否则http服务回包主动关闭连接会有问题
+    // todo：为什么呢？
+    m_listen_sock.setNoCloseWait();
 
     // 设置非阻塞
 
-    int val = 0;
+    m_listen_sock.setblock(false);
 
-    if ((val = fcntl(m_sock, F_GETFL)) < 0)
-    {
-        std::cerr << "get fcntl faild" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-    bool blocking = false;
-    val |= O_NONBLOCK;
-    if ((val = fcntl(m_sock, F_SETFL, val)) < 0)
-    {
-        std::cerr << "set fcntl faild" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-
-    return m_sock;
+    return m_listen_sock.getfd();
 }
 /*
 创建tc epoller
@@ -145,10 +82,10 @@ void tars::NetThread::createEpoll(uint32_t iIndex)
 {
     m_epoller.create(10240);
     // 现在还不是很懂为什么要携带这些数据
-    m_epoller.add(m_shutdown_sock, H64(ET_CLOSE), EPOLLIN);
-    m_epoller.add(m_notify_sock, H64(ET_NOTIFY), EPOLLIN);
+    m_epoller.add(m_shutdown_sock.getfd(), H64(ET_CLOSE), EPOLLIN);
+    m_epoller.add(m_notify_sock.getfd(), H64(ET_NOTIFY), EPOLLIN);
     // 创建socket的文件描述符加上data：ET_LISTEN
-    m_epoller.add(m_sock, H64(ET_LISTEN) | m_sock, EPOLLIN);
+    m_epoller.add(m_listen_sock.getfd(), H64(ET_LISTEN) | m_listen_sock.getfd(), EPOLLIN);
 
     int _total = 200000;
 
@@ -165,21 +102,32 @@ void tars::NetThread::createEpoll(uint32_t iIndex)
 // todo :目前传入参数fd还没有用到
 bool tars::NetThread::accept(int fd)
 {
+
+    TC_Socket cs;
+    cs.setOwner(false);
+
+    // 接收连接
     sockaddr_in addrIn;
     socklen_t addrInLen = sizeof(addrIn);
-    int newFd = ::accept(m_sock, (sockaddr *)&addrIn, &addrInLen);
-    if (newFd == -1)
+    TC_Socket s;
+    //todo：终于用了传入参数fd，但是却在这里相当于临时参数一样（accept之后就没用了，而且accept不会改变自己），
+    // 后续观察到底还干了什么
+    // s.init(fd, false, AF_INET); origin版本，
+
+    int iRetCode = m_listen_sock.accept(cs, (struct sockaddr *)&addrIn, addrInLen);
+
+    if (iRetCode == -1)
     {
         std::cerr << "::accept fail!!!" << std::endl;
+        std::cerr << strerror(errno)<<std::endl;
         return false;
     }
 
     std::string ip;
     uint16_t port = 0;
+    // get string的ip和 port  来展示
     char sAddr[INET_ADDRSTRLEN] = "\0";
-
     inet_ntop(AF_INET, (const void *)&addrIn.sin_addr.s_addr, sAddr, sizeof(sAddr));
-
     ip = sAddr;
     port = ntohs(addrIn.sin_port);
     // show
@@ -191,46 +139,15 @@ bool tars::NetThread::accept(int fd)
     // 使用 长连接 关闭合并发送，使用 非阻塞，允许逗留
     // 设置长连接
     // 如果服务器终止后,服务器可以第二次快速启动而不用等待一段时间
-    int _optval = 1;
-    if (setsockopt(newFd, SOL_SOCKET, SO_KEEPALIVE, (const void *)&_optval, sizeof(_optval)))
-    {
-        std::cerr << "set SO_KEEPALIVE refuse fail" << std::endl;
-        exit(EXIT_FAILURE);
-    }
+    cs.setKeepAlive();
     // 关闭tcp的naga合并发送，提高效率
-    _optval = 1;
-    if (setsockopt(newFd, IPPROTO_TCP, TCP_NODELAY, (const void *)&_optval, sizeof(_optval)))
-    {
-        std::cerr << "[TC_Socket::setTcpNoDelay] error" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-    linger stLinger;
-    stLinger.l_onoff = 1;  // 在close socket调用后, 但是还有数据没发送完毕的时候容许逗留
-    stLinger.l_linger = 5; // 容许逗留的时间为0秒
-
-    if (setsockopt(newFd, SOL_SOCKET, SO_LINGER, (const void *)&stLinger, sizeof(linger)) == -1)
-    {
-        std::cout << "[TC_Socket::setNoCloseWait] error" << std::endl;
-        exit(EXIT_FAILURE);
-    }
+    cs.setTcpNoDelay();
+    cs.setCloseWaitDefault();
 
     // 设置非阻塞
+    cs.setblock(false);
 
-    int val = 0;
-
-    if ((val = fcntl(newFd, F_GETFL)) < 0)
-    {
-        std::cerr << "get fcntl faild" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-    bool blocking = false;
-    val |= O_NONBLOCK;
-    if ((val = fcntl(newFd, F_SETFL, val)) < 0)
-    {
-        std::cerr << "set fcntl faild" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-    //2023-3-25：每次的uid从m_free列表推出，严格保证不重复
+    // 2023-3-25：每次的uid从m_free列表推出，严格保证不重复
     uint32_t uid = m_free.front();
 
     m_free.pop_front();
@@ -238,15 +155,15 @@ bool tars::NetThread::accept(int fd)
     --m_free_size;
 
     // 保存connectid
-    m_listen_connect_id[uid] = newFd;
+    m_listen_connect_id[uid] = cs.getfd();
 
     // 注册到epoll模型
-    //！！！重点：推测这里因为可以携带的数据是uint64，因此化成了高低32位，高32位负责记录事件类型notify，enet等
+    // ！！！重点：推测这里因为可以携带的数据是uint64，因此化成了高低32位，高32位负责记录事件类型notify，enet等
     // 低32位负责记录发生的uid，这里只有uid，那么意思就是默认事件类型为0
     // 又因为结构体里面专门写了enet为0，因此这里就相当于默认事件为enet了，这也就是为什么没有注册enet事件，但是却
     // 可以监听到的原因
     // m_epoller.add(newFd, uid, EPOLLIN | EPOLLOUT);
-    m_epoller.add(newFd, H64(ET_NET) | uid, EPOLLIN | EPOLLOUT);
+    m_epoller.add(cs.getfd(), H64(ET_NET) | uid, EPOLLIN | EPOLLOUT);
 
     return true;
 }
@@ -255,7 +172,6 @@ void tars::NetThread::run()
 {
     std::cout << "start to run ..." << std::endl;
     std::cout << "--------------------" << std::endl;
-
 
     // 自己写的服务器是根据event里面的事件来判断，而这里同意使用携带的数据来判断
 
@@ -275,7 +191,7 @@ void tars::NetThread::run()
                 // different：源代码是do while 来循环接收连接
                 if (event.events && EPOLLIN)
                 {
-                    bool ret = accept(0);
+                    bool ret = accept(event.data.u32);
                 }
                 break;
             case ET_CLOSE:
@@ -287,7 +203,9 @@ void tars::NetThread::run()
                 processPipe();
                 break;
             case ET_NET:
-            // todo：断开连接的时候会进入这里，问题是从来没有注册过ET_NET，为什么会进入这里呢？？？
+                // todo：断开连接的时候会进入这里，问题是从来没有注册过ET_NET，为什么会进入这里呢？？？
+                // 已解决：因为添加epoll事件的时候会添加data.u64,其高32位表示事件类型（不是in，out这些）而是自己写的
+                // ET_NET ET_NOTIFY等 ； 这样来判断，而因为enum中写ET_NET == 0，因此不写事件默认就是ET_NET事件
                 std::cout << "ET_NET" << std::endl;
                 processNet(event);
                 break;
@@ -306,7 +224,7 @@ void tars::NetThread::processNet(const epoll_event &ev)
     int fd = m_listen_connect_id[uid];
 
     std::cout << "processNet uid is " << uid << " fd is " << fd << std::endl;
-    //对方断开连接
+    // 对方断开连接
     if (ev.events & EPOLLERR || ev.events & EPOLLHUP)
     {
         std::cout << "should delet connection" << std::endl;
@@ -326,7 +244,7 @@ void tars::NetThread::processNet(const epoll_event &ev)
 
             if (iBytesReceived < 0)
             {
-                //EAGAIN（非阻塞I/O操作返回，因为当前没有输入数据可用
+                // EAGAIN（非阻塞I/O操作返回，因为当前没有输入数据可用
                 if (errno == EAGAIN)
                 {
                     break;
@@ -337,7 +255,7 @@ void tars::NetThread::processNet(const epoll_event &ev)
                     return;
                 }
             }
-            //返回值为0，表示已经读到文件末尾（End of File, EOF）
+            // 返回值为0，表示已经读到文件末尾（End of File, EOF）
             else if (iBytesReceived == 0)
             {
                 std::cout << "1 client close" << std::endl;
@@ -349,7 +267,7 @@ void tars::NetThread::processNet(const epoll_event &ev)
             _response.response = "this is service response string";
             _response.uid = uid;
 
-            m_epoller.mod(m_notify_sock, H64(ET_NOTIFY), EPOLLOUT);
+            m_epoller.mod(m_listen_sock.getfd(), H64(ET_NOTIFY), EPOLLOUT);
         }
     }
 
@@ -370,8 +288,9 @@ void tars::NetThread::processPipe()
 
     int bytes = ::send(fd, _response.response.c_str(), _response.response.size(), 0);
 
-    if(bytes == -1){
-        std::cout<<strerror(errno)<<std::endl;
+    if (bytes == -1)
+    {
+        std::cout << strerror(errno) << std::endl;
     }
     std::cout << "send byte is " << bytes << "   ";
 
