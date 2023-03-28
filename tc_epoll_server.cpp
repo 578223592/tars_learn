@@ -81,7 +81,7 @@ int tars::NetThread::bind(std::string &ip, int &port)
 void tars::NetThread::createEpoll(uint32_t iIndex)
 {
     m_epoller.create(10240);
-    // 现在还不是很懂为什么要携带这些数据
+    // 现在还不是很懂为什么要携带这些数据 2023-3-28：差不多明白了
     m_epoller.add(m_shutdown_sock.getfd(), H64(ET_CLOSE), EPOLLIN);
     m_epoller.add(m_notify_sock.getfd(), H64(ET_NOTIFY), EPOLLIN);
     // 创建socket的文件描述符加上data：ET_LISTEN
@@ -110,11 +110,11 @@ bool tars::NetThread::accept(int fd)
     sockaddr_in addrIn;
     socklen_t addrInLen = sizeof(addrIn);
     TC_Socket s;
+    s.init(fd,false,AF_INET);
     //todo：终于用了传入参数fd，但是却在这里相当于临时参数一样（accept之后就没用了，而且accept不会改变自己），
-    // 后续观察到底还干了什么
-    // s.init(fd, false, AF_INET); origin版本，
+    // int iRetCode = m_listen_sock.accept(cs, (struct sockaddr *)&addrIn, addrInLen); //这和下面其实是等价的
+    int iRetCode = s.accept(cs, (struct sockaddr *)&addrIn, addrInLen);
 
-    int iRetCode = m_listen_sock.accept(cs, (struct sockaddr *)&addrIn, addrInLen);
 
     if (iRetCode == -1)
     {
@@ -188,9 +188,13 @@ void tars::NetThread::run()
                 // 新连接
             case ET_LISTEN:
                 std::cout << "new connect!!" << std::endl;
-                // different：源代码是do while 来循环接收连接
+                // todo: different：源代码是do while 来循环接收连接 待修改，因为是et模式，所以要一次接收所有
                 if (event.events && EPOLLIN)
                 {
+                    //为什么这里传入event.data.u32就是fd呢？
+                    // 因为在event.data是一个union，内存是共享的，而在add事件的时候添加的data是
+                    //  m_epoller.add(m_listen_sock.getfd(), H64(ET_LISTEN) | m_listen_sock.getfd(), EPOLLIN);
+                    // 因此取低32位就是m_listen_sock.getfd()，也自然是文件描述符了
                     bool ret = accept(event.data.u32);
                 }
                 break;
@@ -267,7 +271,7 @@ void tars::NetThread::processNet(const epoll_event &ev)
             _response.response = "this is service response string";
             _response.uid = uid;
 
-            m_epoller.mod(m_listen_sock.getfd(), H64(ET_NOTIFY), EPOLLOUT);
+            m_epoller.mod(m_notify_sock.getfd(), H64(ET_NOTIFY), EPOLLOUT); //注册完可写时间后会马上触发一次
         }
     }
 
